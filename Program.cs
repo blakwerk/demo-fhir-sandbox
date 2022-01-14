@@ -1,9 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
+
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Rest;
 using Hl7.Fhir.Serialization;
+
+using Task = System.Threading.Tasks.Task;
 
 namespace FhirSample
 {
@@ -12,29 +16,93 @@ namespace FhirSample
     /// </summary>
     internal static class Program
     {
-        private static int _patientNumber = 0;
-
-        private static readonly Dictionary<string, string> _fhirServers = new ()
+        private static readonly Dictionary<string, string> FhirServers = new ()
         {
             {"PublicVonk", "http://vonk.fire.ly"},
             {"PublicHapi", "http://hapi.fhir.org/baseR4"},
             {"Local", "http://localhost:8080/fhir"},
         };
 
-        private static FhirClient _fhirClient = new(_fhirServers["PublicVonk"])
+        /// <summary>
+        /// Main entry point for the program
+        /// </summary>
+        /// <param name="args"></param>
+        private static async Task<int> Main(string[] args)
         {
-            Settings = new FhirClientSettings
+            FhirClient fhirClient = new(FhirServers["PublicVonk"])
             {
-                PreferredFormat = ResourceFormat.Json,
-                PreferredReturn = Prefer.ReturnRepresentation
-            }
-        };
+                Settings = new FhirClientSettings
+                {
+                    PreferredFormat = ResourceFormat.Json,
+                    PreferredReturn = Prefer.ReturnRepresentation
+                }
+            };
 
-        static void Main(string[] args)
-        {
-            GetPatients(_fhirClient);
+            var patient = await CreatePatientAsync(fhirClient, "Foo", "Bar");
+            Console.WriteLine($"Created Patient/{patient.Id}");
+            
+            var patients = GetPatients(fhirClient, maxPatients: 2, onlyWithEncounters: true);
+
+            Console.WriteLine($"Found {patients.Count()} patients.");
+
+            return 0;
         }
 
+        /// <summary>
+        /// Creates a patient with the specified name.
+        /// </summary>
+        /// <param name="client"></param>
+        /// <param name="familyName"></param>
+        /// <param name="givenName"></param>
+        private static async Task<Patient> CreatePatientAsync(
+            FhirClient client,
+            string familyName,
+            string givenName)
+        {
+            var patientToCreate = new Patient
+            {
+                Name = new List<HumanName>
+                {
+                    new()
+                    {
+                        Family = familyName,
+                        Given = new[] {givenName},
+                    },
+                },
+                BirthDateElement = new Date(1970, 01, 01),
+            };
+
+            var created = await client.CreateAsync(patientToCreate);
+            return created;
+        }
+
+        /// <summary>
+        /// Delete a patient, specified by id.
+        /// </summary>
+        /// <param name="client"></param>
+        /// <param name="id"></param>
+        /// <returns></returns>
+        /// <exception cref="ArgumentException"></exception>
+        private static async Task DeletePatientAsync(FhirClient client, string id)
+        {
+            //TODO do some better validation on this ID
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                throw new ArgumentException(nameof(id));
+            }
+
+            // this throws an exception if it fails to delete
+            await client.DeleteAsync($"Patient/{id}");
+        }
+
+        /// <summary>
+        /// Get a collection of patients matching the specified criteria.
+        /// </summary>
+        /// <param name="client"></param>
+        /// <param name="patientCriteria"></param>
+        /// <param name="maxPatients">The maximum number of patients returned (default: 20).</param>
+        /// <param name="onlyWithEncounters">Flag to only return patients with encounters (default: false).</param>
+        /// <returns></returns>
         private static IEnumerable<Patient> GetPatients(
             FhirClient client,
             string[] patientCriteria = null, 
@@ -46,13 +114,13 @@ namespace FhirSample
             Bundle patientBundle;
             if ((patientCriteria == null) || !patientCriteria.Any())
             {
-                patientBundle = _fhirClient.Search<Patient>();
+                patientBundle = client.Search<Patient>();
             }
             else
             {
                 // get list of patients: (really though - get a bundle of resource types)
                 // ex: var patientBundle = _fhirClient.Search<Patient>(new []{"name=test"});
-                patientBundle = _fhirClient.Search<Patient>(patientCriteria);
+                patientBundle = client.Search<Patient>(patientCriteria);
             }
             
             // get patients:
@@ -60,30 +128,6 @@ namespace FhirSample
             {
                 Console.WriteLine($"Patient Bundle.Total: {patientBundle.Total} Entry count: {patientBundle.Entry.Count}");
                 
-                // look at the patients in the bundle (my code)
-                //foreach (var entry in patientBundle.Entry)
-                //{
-                //    Console.WriteLine($"- Entry {_patientNumber, 3}: {entry.FullUrl}");
-                
-                //    var patient = entry.Resource as Patient;
-
-                //    if (patient != null)
-                //    {
-                //        // patient name is a collection. Could .ToString() override
-                //        // $"{patient.Name.FirstOrDefault()}" to print the default
-                //        // given and family names
-                //        Console.WriteLine($" - Id: {patient.Id,20}");
-                //        if (patient.Name.Any())
-                //        {
-                //            Console.WriteLine($"  - Name:  {patient.Name.First()}");
-                //        }
-                //        PrintEncounters(patient);
-                //    }
-
-                //    Console.WriteLine();
-                //    _patientNumber++;
-                //}
-
                 // gino's code:
                 foreach (var entry in patientBundle.Entry)
                 {
@@ -91,7 +135,7 @@ namespace FhirSample
                     {
                         var patient = (Patient) entry.Resource;
 
-                        var encounterBundle = _fhirClient.Search<Encounter>(
+                        var encounterBundle = client.Search<Encounter>(
                             new []
                             {
                                 $"patient=Patient/{patient.Id}",
@@ -126,47 +170,16 @@ namespace FhirSample
                     }
                 }
                 
+                if (patients.Count >= maxPatients)
+                {
+                    break;
+                }
+
                 // get more results:
-                patientBundle = _fhirClient.Continue(patientBundle);
+                patientBundle = client.Continue(patientBundle);
             }
 
             return patients;
-        }
-
-        private static void PrintPatients(Bundle patientBundle)
-        {
-            // look at the patients in the bundle
-            foreach (var entry in patientBundle.Entry)
-            {
-                Console.WriteLine($"- Entry {_patientNumber, 3}: {entry.FullUrl}");
-                
-                var patient = entry.Resource as Patient;
-
-                if (patient != null)
-                {
-                    // patient name is a collection. Could .ToString() override
-                    // $"{patient.Name.FirstOrDefault()}" to print the default
-                    // given and family names
-                    Console.WriteLine($" - Id: {patient.Id,20}");
-                    if (patient.Name.Any())
-                    {
-                        Console.WriteLine($"  - Name:  {patient.Name.First()}");
-                    }
-                    PrintEncounters(patient);
-                }
-
-                Console.WriteLine();
-                _patientNumber++;
-            }
-        }
-
-        private static void PrintEncounters(Patient patient)
-        {
-            var encounterBundle = _fhirClient.Search<Encounter>(
-                new[] {$"patient=Patient/{patient.Id}"});
-
-            Console.WriteLine($" - Encounter total: {encounterBundle.Total}" +
-                              $" Entry count: {encounterBundle.Entry.Count}");
         }
     }
 }
